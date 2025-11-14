@@ -2,7 +2,7 @@ _wandb:
     value:
         cli_version: 0.22.2
         e:
-            p3j97oqslp0ab2h4md9v0qmaomlczbic:
+            7ik7y7yd4a7a7lxm7eetlf74h99sfssb:
                 args:
                     - data=c2db
                 codePath: lrcdvae/run.py
@@ -13,11 +13,11 @@ _wandb:
                 disk:
                     /:
                         total: "536608768000"
-                        used: "105287540736"
+                        used: "105288683520"
                 email: zhouyansong1998@outlook.com
                 executable: /public/home/yszhou/anaconda3/envs/concdvae/bin/python
                 git:
-                    commit: c9e0f09555173eff94ee5d43a2e3e70cab3e8355
+                    commit: c905313e68eae6c664691a430f074b6025ce2841
                     remote: git@github.com:zhouyansong/CDVAE_TEST.git
                 gpu: NVIDIA GeForce RTX 3060 Ti
                 gpu_count: 2
@@ -39,8 +39,8 @@ _wandb:
                 program: /public/home/yszhou/aigc/CDVAE_TEST/lrcdvae/run.py
                 python: CPython 3.11.13
                 root: .
-                startedAt: "2025-11-14T07:13:47.783487Z"
-                writerId: p3j97oqslp0ab2h4md9v0qmaomlczbic
+                startedAt: "2025-11-14T08:10:02.040194Z"
+                writerId: 7ik7y7yd4a7a7lxm7eetlf74h99sfssb
         m:
             - "1": trainer/global_step
               "6":
@@ -135,9 +135,9 @@ data:
                       prop: formation_energy_per_atom
                       save_path: /public/home/yszhou/aigc/CDVAE_TEST/data/c2db/val_data.pt
             num_workers:
-                test: 0
-                train: 0
-                val: 0
+                test: 4
+                train: 15
+                val: 4
         early_stopping_patience: 10
         eval_model_name: c2db
         graph_method: crystalnn

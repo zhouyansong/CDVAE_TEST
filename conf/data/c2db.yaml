@@ -63,9 +63,9 @@ datamodule:
         load_old: ${data.load_old}
 
   num_workers:
-    train: 0 
-    val: 0
-    test: 0
+    train: 15 
+    val: 4
+    test: 4
 
   batch_size:
     train: 32

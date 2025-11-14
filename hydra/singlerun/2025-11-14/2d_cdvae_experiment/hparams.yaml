@@ -60,9 +60,9 @@ data:
         save_path: ${data.root_path}/test_data.pt
         load_old: ${data.load_old}
     num_workers:
-      train: 0
-      val: 0
-      test: 0
+      train: 15
+      val: 4
+      test: 4
     batch_size:
       train: 32
       val: 32

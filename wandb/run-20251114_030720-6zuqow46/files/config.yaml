@@ -2,7 +2,7 @@ _wandb:
     value:
         cli_version: 0.22.2
         e:
-            grhcklquly8wdiyt9lvh5netqfcemaz2:
+            ylkk508nvhofsj340i93gql3wksovg4i:
                 args:
                     - data=c2db
                 codePath: lrcdvae/run.py
@@ -13,11 +13,11 @@ _wandb:
                 disk:
                     /:
                         total: "536608768000"
-                        used: "105287524352"
+                        used: "105287581696"
                 email: zhouyansong1998@outlook.com
                 executable: /public/home/yszhou/anaconda3/envs/concdvae/bin/python
                 git:
-                    commit: c9e0f09555173eff94ee5d43a2e3e70cab3e8355
+                    commit: c905313e68eae6c664691a430f074b6025ce2841
                     remote: git@github.com:zhouyansong/CDVAE_TEST.git
                 gpu: NVIDIA GeForce RTX 3060 Ti
                 gpu_count: 2
@@ -39,8 +39,8 @@ _wandb:
                 program: /public/home/yszhou/aigc/CDVAE_TEST/lrcdvae/run.py
                 python: CPython 3.11.13
                 root: .
-                startedAt: "2025-11-14T07:16:17.203752Z"
-                writerId: grhcklquly8wdiyt9lvh5netqfcemaz2
+                startedAt: "2025-11-14T08:07:20.625229Z"
+                writerId: ylkk508nvhofsj340i93gql3wksovg4i
         m:
             - "1": trainer/global_step
               "6":

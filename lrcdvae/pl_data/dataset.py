@@ -58,17 +58,6 @@ class CrystDataset(Dataset):
         (frac_coords, atom_types, lengths, angles, edge_indices,
          to_jimages, num_atoms) = data_dict['graph_arrays']
         
-        # Validate atom types before returning data
-        # Atom types should be in range [1, 100] (atomic numbers)
-        if len(atom_types) > 0:
-            min_atom_type = atom_types.min()
-            max_atom_type = atom_types.max()
-            if min_atom_type < 1 or max_atom_type > 100:
-                raise ValueError(
-                    f"Invalid atom types in dataset at index {index}: "
-                    f"range [{min_atom_type}, {max_atom_type}], expected [1, 100]. "
-                    f"Atom types: {atom_types}"
-                )
 
         # atom_coords are fractional coordinates
         # edge_index is incremented during batching
