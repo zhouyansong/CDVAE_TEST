@@ -14,7 +14,7 @@ from lrcdvae.common.utils import PROJECT_ROOT
 from lrcdvae.common.data_utils import (
     EPSILON, cart_to_frac_coords, mard, lengths_angles_to_volume,
     frac_to_cart_coords, min_distance_sqr_pbc)
-from v.pl_modules.embeddings import MAX_ATOMIC_NUM
+from lrcdvae.pl_modules.embeddings import MAX_ATOMIC_NUM
 from lrcdvae.pl_modules.embeddings import KHOT_EMBEDDINGS
 
 
