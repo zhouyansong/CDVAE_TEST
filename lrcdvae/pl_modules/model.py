@@ -255,6 +255,14 @@ class CDVAE(BaseModule):
         if gt_atom_types is None:
             cur_atom_types = self.sample_composition(
                 composition_per_atom, num_atoms)
+            
+            # Validate sampled atom types are in valid range [1, MAX_ATOMIC_NUM]  修改
+            if torch.any(cur_atom_types < 1) or torch.any(cur_atom_types > MAX_ATOMIC_NUM):
+                print(f"WARNING: Invalid atom types from sample_composition in langevin_dynamics: "
+                      f"min={cur_atom_types.min().item()}, max={cur_atom_types.max().item()}, "
+                      f"expected range [1, {MAX_ATOMIC_NUM}]")
+                cur_atom_types = torch.clamp(cur_atom_types, 1, MAX_ATOMIC_NUM)
+            
         else:
             cur_atom_types = gt_atom_types
 
@@ -281,6 +289,12 @@ class CDVAE(BaseModule):
 
                 if gt_atom_types is None:
                     cur_atom_types = torch.argmax(pred_atom_types, dim=1) + 1
+                    # Validate atom types are in valid range [1, MAX_ATOMIC_NUM]
+                    if torch.any(cur_atom_types < 1) or torch.any(cur_atom_types > MAX_ATOMIC_NUM):
+                        print(f"WARNING: Invalid atom types in langevin_dynamics: "
+                              f"min={cur_atom_types.min().item()}, max={cur_atom_types.max().item()}, "
+                              f"expected range [1, {MAX_ATOMIC_NUM}]")
+                        cur_atom_types = torch.clamp(cur_atom_types, 1, MAX_ATOMIC_NUM)
 
                 if ld_kwargs.save_traj:
                     all_frac_coords.append(cur_frac_coords)
@@ -311,6 +325,12 @@ class CDVAE(BaseModule):
         return samples
 
     def forward(self, batch, teacher_forcing, training):
+        # Validate input batch atom types
+        if torch.any(batch.atom_types < 1) or torch.any(batch.atom_types > MAX_ATOMIC_NUM):
+            print(f"WARNING: Invalid atom types in batch input: "
+                  f"min={batch.atom_types.min().item()}, max={batch.atom_types.max().item()}, "
+                  f"expected range [1, {MAX_ATOMIC_NUM}]")
+            batch.atom_types = torch.clamp(batch.atom_types, 1, MAX_ATOMIC_NUM)
         # hacky way to resolve the NaN issue. Will need more careful debugging later.
         mu, log_var, z = self.encode(batch)
 
@@ -340,6 +360,13 @@ class CDVAE(BaseModule):
             pred_composition_probs * used_type_sigmas_per_atom[:, None])
         rand_atom_types = torch.multinomial(
             atom_type_probs, num_samples=1).squeeze(1) + 1
+        
+        # Validate sampled atom types are in valid range [1, MAX_ATOMIC_NUM]
+        if torch.any(rand_atom_types < 1) or torch.any(rand_atom_types > MAX_ATOMIC_NUM):
+            print(f"WARNING: Invalid atom types after multinomial sampling: "
+                  f"min={rand_atom_types.min().item()}, max={rand_atom_types.max().item()}, "
+                  f"expected range [1, {MAX_ATOMIC_NUM}]")
+            rand_atom_types = torch.clamp(rand_atom_types, 1, MAX_ATOMIC_NUM)
 
         # add noise to the cart coords
         cart_noises_per_atom = (
@@ -433,6 +460,14 @@ class CDVAE(BaseModule):
                     left_comp_prob, num_samples=left_atom_num, replacement=True)
                 # convert to atomic number
                 left_comp = left_comp + 1
+
+                # Validate sampled atom types are in valid range [1, MAX_ATOMIC_NUM]
+                if torch.any(left_comp < 1) or torch.any(left_comp > MAX_ATOMIC_NUM):
+                    print(f"WARNING: Invalid atom types in sample_composition after multinomial: "
+                          f"min={left_comp.min().item()}, max={left_comp.max().item()}, "
+                          f"expected range [1, {MAX_ATOMIC_NUM}]")
+                    left_comp = torch.clamp(left_comp, 1, MAX_ATOMIC_NUM)
+                
                 sampled_comp = torch.cat([sampled_comp, left_comp], dim=0)
 
             sampled_comp = sampled_comp[torch.randperm(sampled_comp.size(0))]
@@ -485,7 +520,17 @@ class CDVAE(BaseModule):
         return F.mse_loss(pred_lengths_and_angles, target_lengths_and_angles)
 
     def composition_loss(self, pred_composition_per_atom, target_atom_types, batch):
+        # Validate and clamp atom types to valid range before computing loss
+        # Atom types should be in [1, MAX_ATOMIC_NUM], which becomes [0, MAX_ATOMIC_NUM-1] after -1
         target_atom_types = target_atom_types - 1
+
+        # Safety check: clamp values to valid range [0, MAX_ATOMIC_NUM-1]
+        if torch.any(target_atom_types < 0) or torch.any(target_atom_types >= MAX_ATOMIC_NUM):
+            print(f"WARNING: Invalid atom types detected in composition_loss: "
+                  f"min={target_atom_types.min().item()}, max={target_atom_types.max().item()}, "
+                  f"expected range [0, {MAX_ATOMIC_NUM-1}]")
+            target_atom_types = torch.clamp(target_atom_types, 0, MAX_ATOMIC_NUM - 1)
+
         loss = F.cross_entropy(pred_composition_per_atom,
                                target_atom_types, reduction='none')
         return scatter(loss, batch.batch, reduce='mean').mean()
@@ -513,7 +558,17 @@ class CDVAE(BaseModule):
 
     def type_loss(self, pred_atom_types, target_atom_types,
                   used_type_sigmas_per_atom, batch):
+        # Validate and clamp atom types to valid range before computing loss
+        # Atom types should be in [1, MAX_ATOMIC_NUM], which becomes [0, MAX_ATOMIC_NUM-1] after -1
         target_atom_types = target_atom_types - 1
+
+        # Safety check: clamp values to valid range [0, MAX_ATOMIC_NUM-1]
+        if torch.any(target_atom_types < 0) or torch.any(target_atom_types >= MAX_ATOMIC_NUM):
+            print(f"WARNING: Invalid atom types detected in type_loss: "
+                  f"min={target_atom_types.min().item()}, max={target_atom_types.max().item()}, "
+                  f"expected range [0, {MAX_ATOMIC_NUM-1}]")
+            target_atom_types = torch.clamp(target_atom_types, 0, MAX_ATOMIC_NUM - 1)
+        
         loss = F.cross_entropy(
             pred_atom_types, target_atom_types, reduction='none')
         # rescale loss according to noise
@@ -635,7 +690,7 @@ class CDVAE(BaseModule):
         return log_dict, loss
 
 
-@hydra.main(config_path=str(PROJECT_ROOT / "conf"), config_name="default")
+@hydra.main(version_base=None, config_path=str(PROJECT_ROOT / "conf"), config_name="default")
 def main(cfg: omegaconf.DictConfig):
     model: pl.LightningModule = hydra.utils.instantiate(
         cfg.model,

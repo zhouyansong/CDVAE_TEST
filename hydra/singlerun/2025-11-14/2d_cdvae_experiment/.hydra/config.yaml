@@ -1,3 +1,8 @@
+expname: 2d_cdvae_experiment
+core:
+  version: 1.0.0
+  tags:
+  - ${now:%Y-%m-%d}
 data:
   root_path: ${oc.env:PROJECT_ROOT}/data/c2db
   prop: formation_energy_per_atom
@@ -165,8 +170,3 @@ train:
     verbose: false
     save_last: true
     every_n_epochs: 50
-expname: 2d_cdvae_experiment
-core:
-  version: 1.0.0
-  tags:
-  - ${now:%Y-%m-%d}
