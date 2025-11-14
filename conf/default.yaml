@@ -1,0 +1,29 @@
+expname: 2d_cdvae_experiment
+
+# metadata specialised for each experiment
+core:
+  version: 1.0.0
+  tags:
+    - ${now:%Y-%m-%d}
+
+hydra:
+  run:
+    dir: ${oc.env:HYDRA_JOBS}/singlerun/${now:%Y-%m-%d}/${expname}/
+
+  sweep:
+    dir: ${oc.env:HYDRA_JOBS}/multirun/${now:%Y-%m-%d}/${expname}/
+    subdir: ${hydra.job.num}_${hydra.job.id}
+
+  job:
+    env_set:
+      WANDB_START_METHOD: thread
+      WANDB_DIR: ${oc.env:WABDB_DIR}
+
+defaults:
+  - data: default
+  - logging: default
+  - model: vae
+  - optim: default
+  - train: default
+#    Decomment this parameter to get parallel job running
+  # - override hydra/launcher: joblib
