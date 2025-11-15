@@ -16,6 +16,10 @@ from sklearn.metrics import accuracy_score, recall_score, precision_score
 
 from torch_scatter import scatter
 from p_tqdm import p_umap
+from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
+
+from pyxtal.symmetry import Group
+from pyxtal import pyxtal
 import warnings
 # 屏蔽PyMatGen的CIF解析警告
 warnings.filterwarnings("ignore", message="Issues encountered while parsing CIF")
@@ -84,7 +88,6 @@ chemical_symbols = [
 
 CrystalNN = local_env.CrystalNN(
     distance_cutoffs=None, x_diff_weight=-1, porous_adjustment=False, search_cutoff=8.0)
-
 
 def build_crystal(crystal_str, niggli=True, primitive=False):
     """Build crystal from cif string."""
@@ -283,8 +286,8 @@ def get_pbc_distances(
     return_offsets=False,
     return_distance_vec=False,
 ):
-    lattice = lattice_params_to_matrix_torch(lengths, angles)
-
+    lattice = lattice_params_to_matrix_torch(lengths, angles) #通过提供的长度和角度计算晶格矩阵
+    # 需要将分数坐标转换为笛卡尔坐标或者直接输入笛卡尔坐标
     if coord_is_cart:
         pos = coords
     else:
@@ -303,16 +306,21 @@ def get_pbc_distances(
     # compute distances
     distances = distance_vectors.norm(dim=-1)
 
+    # 额外：移除零距离/冗余边，保持与 OCP 行为一致
+    nonzero_idx = torch.arange(len(distances), device=distances.device)[distances != 0]
+    edge_index = edge_index[:, nonzero_idx]
+    distances = distances[nonzero_idx]
+
     out = {
         "edge_index": edge_index,
         "distances": distances,
     }
 
     if return_distance_vec:
-        out["distance_vec"] = distance_vectors
+        out["distance_vec"] = distance_vectors[nonzero_idx]
 
     if return_offsets:
-        out["offsets"] = offsets
+        out["offsets"] = offsets[nonzero_idx]
 
     return out
 
@@ -382,8 +390,35 @@ def radius_graph_pbc(cart_coords, lengths, angles, num_atoms,
     # Get the positions for each atom
     pos1 = torch.index_select(atom_pos, 0, index1)
     pos2 = torch.index_select(atom_pos, 0, index2)
+    # lattice matrix
+    lattice = lattice_params_to_matrix_torch(lengths, angles)
+    # Compute the x, y, z positional offsets for each cell in each image
+    data_cell = torch.transpose(lattice, 1, 2)
+    ################################################################################
+    # 最小“相邻平面”距离的倒数 -> 每方向所需复制次数（见 OCP 推导）
+    cross_a2a3 = torch.cross(lattice[:, 1], lattice[:, 2], dim=-1)
+    cross_a3a1 = torch.cross(lattice[:, 2], lattice[:, 0], dim=-1)
+    cross_a1a2 = torch.cross(lattice[:, 0], lattice[:, 1], dim=-1)
+    cell_vol = torch.sum(lattice[:, 0] * cross_a2a3, dim=-1, keepdim=True)  # (B,1)
 
+    inv_min_dist_a1 = torch.norm(cross_a2a3 / cell_vol, p=2, dim=-1)  # (B,)
+    inv_min_dist_a2 = torch.norm(cross_a3a1 / cell_vol, p=2, dim=-1)
+    inv_min_dist_a3 = torch.norm(cross_a1a2 / cell_vol, p=2, dim=-1)
+    rep_a1 = torch.ceil(radius * inv_min_dist_a1).to(torch.long)       # (B,)
+    rep_a2 = torch.ceil(radius * inv_min_dist_a2).to(torch.long)
+    rep_a3 = torch.ceil(radius * inv_min_dist_a3).to(torch.long)
+    # 为简化批处理，使用每个方向的最大复像次数（与 OCP 一致，相当于 padding）
+    max_rep = [rep_a1.max(), rep_a2.max(), rep_a3.max()]
+    # 构建整数复像网格（[-rep, rep] 的笛卡尔积），替代固定的 OFFSET_LIST
+    cells_per_dim = [
+        torch.arange(-rep, rep + 1, device=device, dtype=torch.float)
+        for rep in max_rep
+    ]
+    unit_cell = torch.cartesian_prod(*cells_per_dim)     # (Nc,3) 整数偏移
+    ################################################################################
     unit_cell = torch.tensor(OFFSET_LIST, device=device).float()
+
+
     num_cells = len(unit_cell)
     unit_cell_per_atom = unit_cell.view(1, num_cells, 3).repeat(
         len(index2), 1, 1
@@ -392,12 +427,7 @@ def radius_graph_pbc(cart_coords, lengths, angles, num_atoms,
     unit_cell_batch = unit_cell.view(1, 3, num_cells).expand(
         batch_size, -1, -1
     )
-
-    # lattice matrix
-    lattice = lattice_params_to_matrix_torch(lengths, angles)
-
-    # Compute the x, y, z positional offsets for each cell in each image
-    data_cell = torch.transpose(lattice, 1, 2)
+    # 将整数偏移映射到实空间偏移
     pbc_offsets = torch.bmm(data_cell, unit_cell_batch)
     pbc_offsets_per_atom = torch.repeat_interleave(
         pbc_offsets, num_atoms_per_image_sqr, dim=0
@@ -828,3 +858,121 @@ class StandardScaler:
             np.isnan(transformed_with_nan), self.replace_nan_token, transformed_with_nan)
 
         return transformed_with_none
+
+
+
+from functools import wraps
+'''新增的功能函数from ocpmodels'''
+def conditional_grad(dec):
+    "Decorator to enable/disable grad depending on whether force/energy predictions are being made"
+    # Adapted from https://stackoverflow.com/questions/60907323/accessing-class-property-as-decorator-argument
+    def decorator(func):
+        @wraps(func)
+        def cls_method(self, *args, **kwargs):
+            f = func
+            if self.regress_forces and not getattr(self, "direct_forces", 0):
+                f = dec(func)
+            return f(self, *args, **kwargs)
+
+        return cls_method
+
+    return decorator
+
+def get_k_index_product_set(num_k_x, num_k_y, num_k_z):
+    # Get a box of k-lattice indices around (0,0,0)
+    k_index_sets = (
+        torch.arange(-num_k_x, num_k_x + 1, dtype=torch.float),
+        torch.arange(-num_k_y, num_k_y + 1, dtype=torch.float),
+        torch.arange(-num_k_z, num_k_z + 1, dtype=torch.float),
+    )
+    k_index_product_set = torch.cartesian_prod(*k_index_sets)
+    # Cut the box in half (we will always assume point symmetry)
+    k_index_product_set = k_index_product_set[
+        k_index_product_set.shape[0] // 2 + 1 :
+    ]
+
+    # Amount of k-points
+    num_k_degrees_of_freedom = k_index_product_set.shape[0]
+
+    return k_index_product_set, num_k_degrees_of_freedom
+
+
+def get_k_voxel_grid(k_cutoff, delta_k, num_k_rbf):
+
+    # Get indices for a cube of k-lattice sites containing the cutoff sphere
+    num_k = k_cutoff / delta_k
+    k_index_product_set, _ = get_k_index_product_set(num_k, num_k, num_k)
+
+    # Orthogonal k-space basis, norm delta_k
+    k_cell = torch.tensor(
+        [[delta_k, 0, 0], [0, delta_k, 0], [0, 0, delta_k]], dtype=torch.float
+    )
+
+    # Translate lattice indices into k-vectors
+    k_grid = torch.matmul(k_index_product_set, k_cell)
+
+    # Prune all k-vectors outside the cutoff sphere
+    k_grid = k_grid[torch.sum(k_grid**2, dim=-1) <= k_cutoff**2]
+
+    # Probably quite arbitrary, for backwards compatibility with scaling
+    # yaml files produced with old Ewald Message Passing code
+    k_offset = 0.1 if num_k_rbf <= 48 else 0.25
+
+    # Evaluate a basis of Gaussian RBF on the k-vectors
+    k_rbf_values = RadialBasis(
+        num_radial=num_k_rbf,
+        # Avoids zero or extremely small RBF values (there are k-points until
+        # right at the cutoff, where all RBF would otherwise drop to 0)
+        cutoff=k_cutoff + k_offset,
+        rbf={"name": "gaussian"},
+        envelope={"name": "polynomial", "exponent": 5},
+    )(
+        torch.linalg.norm(k_grid, dim=-1)
+    )  # Tensor of shape (N_k, N_RBF)
+
+    num_k_degrees_of_freedom = k_rbf_values.shape[-1]
+
+    return k_grid, k_rbf_values, num_k_degrees_of_freedom
+
+def pos_svd_frame(data):
+    pos = data.pos
+    batch = data.batch
+    batch_size = int(batch.max()) + 1
+
+    with torch.cuda.amp.autocast(False):
+        rotated_pos_list = []
+        for i in range(batch_size):
+            # Center each structure around mean position
+            pos_batch = pos[batch == i]
+            pos_batch = pos_batch - pos_batch.mean(0)
+
+            # Rotate each structure into its SVD frame
+            # (only can do this if structure has at least 3 atoms,
+            # i.e., the position matrix has full rank)
+            if pos_batch.shape[0] > 2:
+                U, S, V = torch.svd(pos_batch)
+                rotated_pos_batch = torch.matmul(pos_batch, V)
+
+            else:
+                rotated_pos_batch = pos_batch
+
+            rotated_pos_list.append(rotated_pos_batch)
+
+        pos = torch.cat(rotated_pos_list)
+
+    return pos
+
+def x_to_k_cell(cells):
+
+    cross_a2a3 = torch.cross(cells[:, 1], cells[:, 2], dim=-1)
+    cross_a3a1 = torch.cross(cells[:, 2], cells[:, 0], dim=-1)
+    cross_a1a2 = torch.cross(cells[:, 0], cells[:, 1], dim=-1)
+    vol = torch.sum(cells[:, 0] * cross_a2a3, dim=-1, keepdim=True)
+
+    b1 = 2 * np.pi * cross_a2a3 / vol
+    b2 = 2 * np.pi * cross_a3a1 / vol
+    b3 = 2 * np.pi * cross_a1a2 / vol
+
+    bcells = torch.stack((b1, b2, b3), dim=1)
+
+    return (bcells, vol[:, 0])

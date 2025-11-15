@@ -1,6 +1,6 @@
 _target_: lrcdvae.pl_modules.model.CDVAE
 hidden_dim: 256
-latent_dim: 256
+latent_dim: 128
 fc_num_layers: 1
 max_atoms: ${data.max_atoms}
 cost_natom: 1.
@@ -23,5 +23,5 @@ num_noise_level: 50
 predict_property: False
 
 defaults:
-  - encoder: dimenet
+  - encoder: comenet
   - decoder: gemnet

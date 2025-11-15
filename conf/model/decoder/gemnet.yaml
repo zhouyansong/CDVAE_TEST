@@ -4,3 +4,13 @@ latent_dim: ${model.latent_dim}
 max_neighbors: ${model.max_neighbors}
 radius: ${model.radius}
 scale_file: ${oc.env:PROJECT_ROOT}/lrcdvae/pl_modules/gemnet/gemnet-dT.json
+
+######################################### Ewald message passing hyperparameters
+ewald_hyperparams:
+  num_k_x: 2                              # Frequency cutoff [Å^-1]
+  num_k_y: 2                              # Voxel grid resolution [Å^-1]
+  num_k_z: 5                              # Gaussian radial basis size (Fourier filter)
+  downprojection_size: 16                 # Size of linear bottleneck layer
+  num_hidden: 3                           # Number of residuals in update function
+#########################################
+atom_to_atom_cutoff: 10.0

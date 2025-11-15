@@ -1,0 +1,38 @@
+_target_: cond2dcdvae.pl_modules.encoder.ComENet
+
+num_targets: ${data.num_targets}
+hidden_channels: 128
+middle_channels: 64
+num_blocks: 4
+cutoff: 8.0
+max_num_neighbors: 30
+num_radial: 6
+num_spherical: 7
+hetero: False
+num_output_layers: 4
+readout: ${data.readout}
+# ========== Graph Construction ==========
+use_pbc: True                           # 使用周期性边界条件
+otf_graph: ${data.otf_graph}            # 是否动态构建图
+
+# ========== Ewald Long-Range Interaction ==========
+use_ewald: True                         # 开启Ewald长程相互作用
+ewald_hyperparams:
+  # PBC 模式参数 (use_pbc=True 时使用)
+  num_k_x: 2                            # k-空间 x 方向索引数
+  num_k_y: 2                            # k-空间 y 方向索引数
+  num_k_z: 5                            # k-空间 z 方向索引数
+  
+  # 非PBC 模式参数 (use_pbc=False 时使用)
+  # k_cutoff: 10.0                      # k-空间截断 [Å^-1]
+  # delta_k: 0.5                        # 体素网格分辨率 [Å^-1]
+  # num_k_rbf: 16                       # 径向k-滤波器基础大小
+  
+  # 通用参数
+  downprojection_size: 16               # k-空间下投影层大小
+  num_hidden: 2                         # Ewald更新函数中的残差块数
+  detach_ewald: False                   # 是否detach Ewald梯度 (encoder设为False)
+
+# ========== Atom-to-Atom Long-Range MP (Optional) ==========
+atom_to_atom_cutoff: 10.0               # 原子间长程消息传递截断距离 [Å]
+                                        # 设为null可禁用此功能

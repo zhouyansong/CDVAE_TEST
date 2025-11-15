@@ -9,13 +9,13 @@ graph_method: crystalnn
 lattice_scale_method: scale_length
 preprocess_workers: 30
 readout: mean
-max_atoms: 30
+max_atoms: 50
 otf_graph: false
 eval_model_name: c2db
 load_old: true
 
-train_max_epochs: 100
-early_stopping_patience: 10
+train_max_epochs: 5000
+early_stopping_patience: 100000
 teacher_forcing_max_epoch: 50
 
 

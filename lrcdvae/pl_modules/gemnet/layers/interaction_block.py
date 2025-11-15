@@ -16,7 +16,8 @@ from .efficient import (
 )
 from .embedding_block import EdgeEmbedding
 from .scaling import ScalingFactor
-
+from torch_geometric.nn.models.schnet import InteractionBlock
+from lrcdvae.pl_modules.ewald_block import EwaldBlock
 
 class InteractionBlockTripletsOnly(torch.nn.Module):
     """
@@ -64,13 +65,35 @@ class InteractionBlockTripletsOnly(torch.nn.Module):
         num_after_skip,
         num_concat,
         num_atom,
+        use_pbc,
+        use_ewald,
+        ewald_downprojection,
+        downprojection_size,
+        delta_k,
+        k_rbf_values,
         activation=None,
         scale_file=None,
         name="Interaction",
+        atom_to_atom_cutoff=None,
     ):
         super().__init__()
         self.name = name
+        self.use_pbc = use_pbc
+        self.use_ewald = use_ewald
+        self.atom_to_atom_cutoff = atom_to_atom_cutoff
+        self.use_atom_to_atom_mp = atom_to_atom_cutoff is not None
+        if self.use_atom_to_atom_mp:
+            # SchNet interactions for atom-to-atom message passing
+            self.interaction_at = InteractionBlock(
+                emb_size_atom,
+                200,  # num Gaussians
+                256,  # num filters
+                self.atom_to_atom_cutoff,
+            )
 
+        self.skip_connection_factor = (
+            2.0 + float(self.use_ewald) + float(self.use_atom_to_atom_mp)
+        ) ** (-0.5)
         block_nr = name.split("_")[-1]
 
         ## -------------------------------------------- Message Passing ------------------------------------------- ##
@@ -93,7 +116,19 @@ class InteractionBlockTripletsOnly(torch.nn.Module):
             scale_file=scale_file,
             name=f"TripInteraction_{block_nr}",
         )
-
+        ## ---------------------------------------- Ewald Message Passing ----------------------------------------- ##
+        if self.use_ewald:
+            self.ewald_block = EwaldBlock(
+                ewald_downprojection,
+                emb_size_atom,  # Embedding size of short-range GNN
+                downprojection_size,
+                num_atom,  # Number of residuals in update function
+                activation="silu",
+                use_pbc=self.use_pbc,
+                delta_k=delta_k,
+                k_rbf_values=k_rbf_values,
+                name=f"EwaldUpdate_{block_nr}",
+            )
         ## ---------------------------------------- Update Edge Embeddings ---------------------------------------- ##
         # Residual layers before skip connection
         self.layers_before_skip = torch.nn.ModuleList(
@@ -143,6 +178,7 @@ class InteractionBlockTripletsOnly(torch.nn.Module):
         )
 
         self.inv_sqrt_2 = 1 / math.sqrt(2.0)
+        self.inv_sqrt_3 = 1 / math.sqrt(3.0)
 
     def forward(
         self,
@@ -157,6 +193,15 @@ class InteractionBlockTripletsOnly(torch.nn.Module):
         rbf_h,
         idx_s,
         idx_t,
+        pos,
+        k_grid,
+        batch_size,
+        batch,
+        dot,
+        sinc_damping,
+        edge_index_at,
+        edge_weight_at,
+        edge_attr_at,
     ):
         """
         Returns
@@ -199,10 +244,22 @@ class InteractionBlockTripletsOnly(torch.nn.Module):
 
         ## ---------------------------------------- Update Atom Embeddings --------------------------------------- ##
         h2 = self.atom_update(h, m, rbf_h, idx_t)
+        if self.use_ewald:
+            h3, dot, sinc_damping = self.ewald_block(
+                h, pos, k_grid, batch_size, batch, dot, sinc_damping
+            )
+        else:
+            h3 = 0
+        if self.use_atom_to_atom_mp:
+            h4 = self.interaction_at(
+                h, edge_index_at, edge_weight_at, edge_attr_at
+            )
+        else:
+            h4 = 0
 
         # Skip connection
-        h = h + h2  # (nAtoms, emb_size_atom)
-        h = h * self.inv_sqrt_2
+        h = h + h2 + h3 + h4 # (nAtoms, emb_size_atom)
+        h = h * self.skip_connection_factor
 
         ## ----------------------------- Update Edge Embeddings with Atom Embeddings ----------------------------- ##
         m2 = self.concat_layer(h, m, idx_s, idx_t)  # (nEdges, emb_size_edge)
@@ -213,7 +270,7 @@ class InteractionBlockTripletsOnly(torch.nn.Module):
         # Skip connection
         m = m + m2  # (nEdges, emb_size_edge)
         m = m * self.inv_sqrt_2
-        return h, m
+        return h, m, dot, sinc_damping
 
 
 class TripletInteraction(torch.nn.Module):

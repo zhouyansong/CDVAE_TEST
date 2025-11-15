@@ -24,6 +24,10 @@ class GemNetTDecoder(nn.Module):
         max_neighbors=20,
         radius=6.,
         scale_file=None,
+        # 需要添加: Ewald 相关参数
+        ewald_hyperparams=None,  # 添加此参数
+        # 需要添加: atom-to-atom 消息传递的截断距离
+        atom_to_atom_cutoff=None,  # 添加此参数
     ):
         super(GemNetTDecoder, self).__init__()
         self.cutoff = radius
@@ -39,6 +43,10 @@ class GemNetTDecoder(nn.Module):
             max_neighbors=self.max_num_neighbors,
             otf_graph=True,
             scale_file=scale_file,
+            # 需要添加: 传递 Ewald 参数给 GemNetT
+            ewald_hyperparams=ewald_hyperparams,  # 添加此参数
+            # 需要添加: 传递 atom_to_atom_cutoff 参数
+            atom_to_atom_cutoff=atom_to_atom_cutoff,  # 添加此参数
         )
         self.fc_atom = nn.Linear(hidden_dim, MAX_ATOMIC_NUM)
 

@@ -41,10 +41,8 @@ class BaseModule(pl.LightningModule):
         scheduler = hydra.utils.instantiate(
             self.hparams.optim.lr_scheduler, optimizer=opt
         )
-        return {"optimizer": opt, "lr_scheduler": {
-                "scheduler": scheduler,
-                "monitor": "val_loss",
-            }}  # 将lr_scheduler整合进一个字典中
+        #return {"optimizer": opt, "lr_scheduler": scheduler, "monitor": "val_loss"}
+        return { "optimizer": opt, "lr_scheduler": { "scheduler": scheduler, "frequency": 5, "monitor": "val_loss",},}
 
 
 class CrystGNN_Supervise(BaseModule):
@@ -340,7 +338,7 @@ class CDVAE(BaseModule):
             pred_composition_probs * used_type_sigmas_per_atom[:, None])
         rand_atom_types = torch.multinomial(
             atom_type_probs, num_samples=1).squeeze(1) + 1
-        
+
         # add noise to the cart coords
         cart_noises_per_atom = (
             torch.randn_like(batch.frac_coords) *
@@ -535,17 +533,20 @@ class CDVAE(BaseModule):
             on_step=True,
             on_epoch=True,
             prog_bar=True,
+            sync_dist=True
         )
         return loss
 
     def validation_step(self, batch: Any, batch_idx: int) -> torch.Tensor:
         outputs = self(batch, teacher_forcing=False, training=False)
         log_dict, loss = self.compute_stats(batch, outputs, prefix='val')
+        # self.log("val_loss", loss, sync_dist=True)
         self.log_dict(
             log_dict,
             on_step=False,
             on_epoch=True,
             prog_bar=True,
+            sync_dist=True
         )
         return loss
 

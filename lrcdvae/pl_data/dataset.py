@@ -53,12 +53,11 @@ class CrystDataset(Dataset):
     def __getitem__(self, index):
         data_dict = self.cached_data[index]
 
-        # scaler is set in DataModule set stage
-        prop = self.scaler.transform(data_dict[self.prop])
+        # scaler is set in DataModule set stage  首先scaler是在DataModule的setup阶段注入。用训练集拟合加载的scaler，然后在这里使用
+        prop = self.scaler.transform(data_dict[self.prop])  # 为什么用的是transform而不是fit，因为fit只需要做一次拟合
         (frac_coords, atom_types, lengths, angles, edge_indices,
          to_jimages, num_atoms) = data_dict['graph_arrays']
         
-
         # atom_coords are fractional coordinates
         # edge_index is incremented during batching
         # https://pytorch-geometric.readthedocs.io/en/latest/notes/batching.html

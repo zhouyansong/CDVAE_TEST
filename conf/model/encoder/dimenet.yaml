@@ -15,3 +15,12 @@ num_before_skip: 1
 num_after_skip: 2
 num_output_layers: 3
 readout: ${data.readout}
+use_pbc: True
+######################################### Ewald message passing hyperparameters
+ewald_hyperparams:
+  num_k_x: 2                              # Frequency cutoff [Å^-1]
+  num_k_y: 2                              # Voxel grid resolution [Å^-1]
+  num_k_z: 5                              # Gaussian radial basis size (Fourier filter)
+  downprojection_size: 8                  # Size of linear bottleneck layer
+  num_hidden: 3                           # Number of residuals in update function
+#########################################

@@ -13,3 +13,6 @@ lr_scheduler:
   factor: 0.6
   patience: 30
   min_lr: 1e-4
+  threshold: 0.0001                     # 改善阈值 (防止噪声触发)
+  threshold_mode: rel                   # 相对阈值 (推荐)
+  cooldown: 5                           # 降低lr后等待5个epoch

@@ -126,7 +126,8 @@ def repeat_blocks(
     # Remove 0 sizes
     sizes_nonzero = sizes > 0
     if not torch.all(sizes_nonzero):
-
+        print('sizes_non')
+        print(sizes_nonzero)
         assert block_inc == 0  # Implementing this is not worth the effort
         sizes = torch.masked_select(sizes, sizes_nonzero)
         if isinstance(repeats, torch.Tensor):
@@ -191,18 +192,16 @@ def repeat_blocks(
             # first element. So, simply assign 1s there.
             insert_val[idx] = 1
 
-        # Add block increments     #新加入一个改进
+        # Add block increments
+        #  新增一个分支，处理 block_inc 为 Tensor 的情况 这不是原版有的
         # if isinstance(block_inc, torch.Tensor):
         #     diffs = r1[1:] - r1[:-1]
         #     indptr = torch.cat((sizes.new_zeros(1), diffs.cumsum(0)))
         #     block_inc = segment_csr(
         #         block_inc[: r1[-1]], indptr, reduce="sum"
         #     )
-        #     #zero = sizes.new_zeros(1)
-        #     #block_inc = torch.cat((zero, block_inc))
         #     insert_val[idx] += block_inc[idx]
-
-        # else:
+        # else:        
         insert_val[idx] += block_inc
 
     # Add repeat_inc within each group

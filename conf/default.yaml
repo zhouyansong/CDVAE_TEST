@@ -1,4 +1,4 @@
-expname: 2d_cdvae_experiment
+expname: c2db_cdvae_experiment
 
 # metadata specialised for each experiment
 core:
@@ -16,7 +16,7 @@ hydra:
 
   job:
     env_set:
-      WANDB_START_METHOD: thread
+      #WANDB_START_METHOD: thread
       WANDB_DIR: ${oc.env:WABDB_DIR}
 
 defaults:

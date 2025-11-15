@@ -10,11 +10,22 @@ from typing import Optional
 import numpy as np
 import torch
 import torch.nn as nn
+from torch_geometric.nn import radius_graph
+from torch_geometric.nn.models.schnet import GaussianSmearing, InteractionBlock
 from torch_scatter import scatter
 from torch_sparse import SparseTensor
 
 from lrcdvae.common.data_utils import (
-    get_pbc_distances, radius_graph_pbc, frac_to_cart_coords)
+    get_pbc_distances,
+    frac_to_cart_coords,
+    radius_graph_pbc,
+    conditional_grad,
+    get_k_index_product_set,
+    get_k_voxel_grid,
+    pos_svd_frame,
+    lattice_params_to_matrix_torch,
+    x_to_k_cell,
+    )
 
 from .layers.atom_update_block import OutputBlock
 from .layers.base_layers import Dense
@@ -114,20 +125,26 @@ class GemNetT(torch.nn.Module):
         num_concat: int = 1,
         num_atom: int = 3,
         regress_forces: bool = True,
+        direct_forces: bool = False, 
         cutoff: float = 6.0,
         max_neighbors: int = 50,
         rbf: dict = {"name": "gaussian"},
         envelope: dict = {"name": "polynomial", "exponent": 5},
         cbf: dict = {"name": "spherical_harmonics"},
+        extensive: bool = True,
         otf_graph: bool = False,
+        use_pbc: bool = True,
         output_init: str = "HeOrthogonal",
         activation: str = "swish",
         scale_file: Optional[str] = None,
+        ewald_hyperparams=None,
+        atom_to_atom_cutoff=None,
     ):
         super().__init__()
         self.num_targets = num_targets
         assert num_blocks > 0
         self.num_blocks = num_blocks
+        self.extensive = extensive
 
         self.cutoff = cutoff
         # assert self.cutoff <= 6 or otf_graph
@@ -137,7 +154,26 @@ class GemNetT(torch.nn.Module):
 
         self.regress_forces = regress_forces
         self.otf_graph = otf_graph
+        self.use_pbc = use_pbc
+        self.atom_to_atom_cutoff = atom_to_atom_cutoff
+        self.use_atom_to_atom_mp = atom_to_atom_cutoff is not None
+        if self.use_atom_to_atom_mp:
+            if self.use_pbc:
+                # Compute neighbor threshold from cutoff assuming uniform atom density
+                self.max_neighbors_at = int(
+                    (self.atom_to_atom_cutoff / 6.0) ** 3 * 50
+                )
+            else:
+                self.max_neighbors_at = 100
+            self.distance_expansion_at = GaussianSmearing(
+                0.0, self.atom_to_atom_cutoff, 200
+            )
+        else:
+            self.max_neighbors_at = None
+            self.distance_expansion_at = None
 
+        # GemNet variants
+        self.direct_forces = direct_forces
         AutomaticFit.reset()  # make sure that queue is empty (avoid potential error)
 
         ### ---------------------------------- Basis Functions ---------------------------------- ###
@@ -161,6 +197,68 @@ class GemNetT(torch.nn.Module):
             efficient=True,
         )
         ### ------------------------------------------------------------------------------------- ###
+        ### -------------------------------- Ewald Message Passing ------------------------------ ###
+
+        self.use_ewald = ewald_hyperparams is not None
+
+        # Parse Ewald hyperparams
+        if self.use_ewald:
+            if self.use_pbc:
+                # Integer values to define box of k-lattice indices
+                self.num_k_x = ewald_hyperparams["num_k_x"]
+                self.num_k_y = ewald_hyperparams["num_k_y"]
+                self.num_k_z = ewald_hyperparams["num_k_z"]
+                self.delta_k = None
+            else:
+                self.k_cutoff = ewald_hyperparams["k_cutoff"]
+                # Voxel grid resolution
+                self.delta_k = ewald_hyperparams["delta_k"]
+                # Radial k-filter basis size
+                self.num_k_rbf = ewald_hyperparams["num_k_rbf"]
+            self.downprojection_size = ewald_hyperparams["downprojection_size"]
+            # Number of residuals in update function
+            self.num_hidden = ewald_hyperparams["num_hidden"]
+
+        # Initialize k-space structure
+        if self.use_ewald:
+            if self.use_pbc:
+                # Get the reciprocal lattice indices of included k-vectors
+                (
+                    self.k_index_product_set,
+                    self.num_k_degrees_of_freedom,
+                ) = get_k_index_product_set(
+                    self.num_k_x,
+                    self.num_k_y,
+                    self.num_k_z,
+                )
+                self.k_rbf_values = None
+                self.delta_k = None
+
+            else:
+                # Get the k-space voxel and evaluate Gaussian RBF (can be done at
+                # initialization time as voxel grid stays fixed for all structures)
+                (
+                    self.k_grid,
+                    self.k_rbf_values,
+                    self.num_k_degrees_of_freedom,
+                ) = get_k_voxel_grid(
+                    self.k_cutoff,
+                    self.delta_k,
+                    self.num_k_rbf,
+                )
+
+            # Downprojection layer, weights are shared among all interaction blocks
+            self.down = Dense(
+                self.num_k_degrees_of_freedom,
+                self.downprojection_size,
+                activation=None,
+                bias=False,
+            )
+        else:
+            self.down = None
+            self.downprojection_size = None
+            self.delta_k = None
+            self.k_rbf_values = None
 
         ### ------------------------------- Share Down Projections ------------------------------ ###
         # Share down projection across all interaction blocks
@@ -217,6 +315,13 @@ class GemNetT(torch.nn.Module):
                     activation=activation,
                     scale_file=scale_file,
                     name=f"IntBlock_{i+1}",
+                    use_pbc=self.use_pbc,
+                    use_ewald=self.use_ewald,
+                    ewald_downprojection=self.down,
+                    downprojection_size=self.downprojection_size,
+                    delta_k=self.delta_k,
+                    k_rbf_values=self.k_rbf_values,
+                    atom_to_atom_cutoff=self.atom_to_atom_cutoff,
                 )
             )
 
@@ -240,11 +345,16 @@ class GemNetT(torch.nn.Module):
         self.int_blocks = torch.nn.ModuleList(int_blocks)
 
         self.shared_parameters = [
-            (self.mlp_rbf3, self.num_blocks),
-            (self.mlp_cbf3, self.num_blocks),
-            (self.mlp_rbf_h, self.num_blocks),
-            (self.mlp_rbf_out, self.num_blocks + 1),
+            (self.mlp_rbf3.linear.weight, self.num_blocks),
+            (self.mlp_cbf3.weight, self.num_blocks),
+            (self.mlp_rbf_h.linear.weight, self.num_blocks),
+            (self.mlp_rbf_out.linear.weight, self.num_blocks + 1),
         ]
+        if self.use_ewald:
+            self.shared_parameters += [
+                (self.down.linear.weight, self.num_blocks)
+            ]
+
 
     def get_triplets(self, edge_index, num_atoms):
         """
@@ -345,10 +455,43 @@ class GemNetT(torch.nn.Module):
         )
 
         # Count remaining edges per image
-        batch_edge = torch.repeat_interleave(
-            torch.arange(neighbors.size(0), device=edge_index.device),
-            neighbors,
-        )
+        # batch_edge = torch.repeat_interleave(
+        #     torch.arange(neighbors.size(0), device=edge_index.device),
+        #     neighbors,
+        # )
+        # 修复：基于实际边数创建 batch_edge，而不是依赖于 neighbors 参数
+        total_edges = edge_index.size(1)
+        if total_edges != neighbors.sum():
+            # 重新计算每个结构的边数
+            batch_edge = torch.zeros(total_edges, dtype=torch.long, device=edge_index.device)
+            cumsum = 0
+            for i, num_atoms_i in enumerate(torch.bincount(edge_index[0], minlength=neighbors.size(0))):
+                if num_atoms_i > 0:
+                    # 找到属于第i个结构的边
+                    atom_offset = neighbors[:i].sum() if i > 0 else 0
+                    edge_mask = (edge_index[0] >= atom_offset) & (edge_index[0] < atom_offset + neighbors[i])
+                    batch_edge[edge_mask] = i
+        else:
+            batch_edge = torch.repeat_interleave(
+                torch.arange(neighbors.size(0), device=edge_index.device),
+                neighbors,
+            )
+        
+        # 确保 batch_edge 和 mask 的长度一致
+        if batch_edge.size(0) != mask.size(0):
+            # 如果长度不匹配，重新构建 batch_edge
+            batch_edge = torch.zeros(mask.size(0), dtype=torch.long, device=edge_index.device)
+            atom_cumsum = torch.cat([torch.tensor([0], device=neighbors.device), neighbors.cumsum(0)[:-1]])
+            
+            for i, (start, count) in enumerate(zip(atom_cumsum, neighbors)):
+                end = start + count
+                if end > start:  # 确保该结构有边
+                    edge_mask = torch.zeros(mask.size(0), dtype=torch.bool, device=mask.device)
+                    # 找到属于第i个结构的边
+                    for edge_idx in range(mask.size(0)):
+                        if edge_index[0, edge_idx] >= start and edge_index[0, edge_idx] < end:
+                            edge_mask[edge_idx] = True
+                    batch_edge[edge_mask] = i
         batch_edge = batch_edge[mask]
         neighbors_new = 2 * torch.bincount(
             batch_edge, minlength=neighbors.size(0)
@@ -418,7 +561,35 @@ class GemNetT(torch.nn.Module):
             edge_index, to_jimages, num_bonds = radius_graph_pbc(
                 cart_coords, lengths, angles, num_atoms, self.cutoff, self.max_neighbors,
                 device=num_atoms.device)
-
+        # ====== 添加：处理没有边的情况 ======
+        # 如果某个结构完全没有边（2D材料的真空层太大导致），创建虚拟边
+        batch_size = len(num_atoms)
+        for batch_idx in range(batch_size):
+            if num_bonds[batch_idx] == 0:
+                # 为没有边的结构创建自环（self-loop）
+                start_atom = num_atoms[:batch_idx].sum() if batch_idx > 0 else 0
+                end_atom = start_atom + num_atoms[batch_idx]
+                
+                # 创建自环边：每个原子连接自己
+                self_loop_edges = torch.arange(start_atom, end_atom, device=edge_index.device)
+                self_loop_edge_index = torch.stack([self_loop_edges, self_loop_edges], dim=0)
+                
+                # 创建零偏移
+                zero_offset = torch.zeros((num_atoms[batch_idx], 3), 
+                                        dtype=to_jimages.dtype, 
+                                        device=to_jimages.device)
+                
+                # 合并到原始边
+                if edge_index.numel() > 0:
+                    edge_index = torch.cat([edge_index, self_loop_edge_index], dim=1)
+                    to_jimages = torch.cat([to_jimages, zero_offset], dim=0)
+                else:
+                    edge_index = self_loop_edge_index
+                    to_jimages = zero_offset
+                
+                # 更新 num_bonds
+                num_bonds[batch_idx] = num_atoms[batch_idx]
+        # ====== 添加结束 ======
         # Switch the indices, so the second one becomes the target index,
         # over which we can efficiently aggregate.
         out = get_pbc_distances(
@@ -440,6 +611,11 @@ class GemNetT(torch.nn.Module):
         # But we want to use col as idx_t for efficient aggregation.
         V_st = -out["distance_vec"] / D_st[:, None]
         # offsets_ca = -out["offsets"]  # a - c + offset
+        #cell_offsets_filtered = out["offsets"]
+        # 需要将 offsets（笛卡尔坐标）转回整数 jimage 索引
+        # 但实际上在后续使用中，我们可以直接使用 offsets
+        # 所以这里传递 offsets 而不是 to_jimages
+        # ===== 修复结束 =====
 
         # # Mask interaction edges if required
         # if self.otf_graph or np.isclose(self.cutoff, 6):
@@ -513,6 +689,7 @@ class GemNetT(torch.nn.Module):
         batch = torch.arange(num_atoms.size(0),
                              device=num_atoms.device).repeat_interleave(
                                  num_atoms, dim=0)
+        batch_size = int(batch.max()) + 1
         atomic_numbers = atom_types
 
         (
@@ -528,13 +705,50 @@ class GemNetT(torch.nn.Module):
             pos, lengths, angles, num_atoms, edge_index, to_jimages,
             num_bonds)
         idx_s, idx_t = edge_index
+        if self.use_atom_to_atom_mp:
+            # Use separate graph (larger cutoff) for atom-to-atom long-range block
+            edge_index_at, cell_offsets_at, neighbors_at = radius_graph_pbc(
+                pos, lengths, angles, num_atoms, self.atom_to_atom_cutoff, self.max_neighbors_at,
+                device=num_atoms.device)
+            out_at = get_pbc_distances(pos, edge_index_at, lengths, angles,
+            cell_offsets_at,
+            num_atoms,      # num_atoms（每结构原子数）
+            neighbors_at,
+            coord_is_cart=True,
+            return_offsets=True,
+            return_distance_vec=True)
+            edge_index_at = out_at["edge_index"]
+            edge_weight_at = out_at["distances"]
+            edge_attr_at = self.distance_expansion_at(edge_weight_at)
 
+        else:
+            edge_index_at = None
+            edge_weight_at = None
+            edge_attr_at = None
+        
         # Calculate triplet angles
         cosφ_cab = inner_product_normalized(V_st[id3_ca], V_st[id3_ba])
         rad_cbf3, cbf3 = self.cbf_basis3(D_st, cosφ_cab, id3_ca)
 
         rbf = self.radial_basis(D_st)
-
+        if self.use_ewald:
+            if self.use_pbc:
+                lattice = lattice_params_to_matrix_torch(lengths, angles)
+                # Compute reciprocal lattice basis of structure
+                k_cell, _ = x_to_k_cell(lattice)
+                # Translate lattice indices to k-vectors
+                k_grid = torch.matmul(
+                    self.k_index_product_set.to(batch.device), k_cell
+                )
+            else:
+                k_grid = (
+                    self.k_grid.to(batch.device)
+                    .unsqueeze(0)
+                    .expand(batch_size, -1, -1)
+                )
+        else:
+            k_grid = None
+        
         # Embedding block
         h = self.atom_emb(atomic_numbers)
         # Merge z and atom embedding
@@ -553,10 +767,13 @@ class GemNetT(torch.nn.Module):
 
         E_t, F_st = self.out_blocks[0](h, m, rbf_out, idx_t)
         # (nAtoms, num_targets), (nEdges, num_targets)
-
+        dot = (
+            None  # These will be computed in first Ewald block and then passed
+        )
+        sinc_damping = None  # on between later Ewald blocks (avoids redundant recomputation)
         for i in range(self.num_blocks):
             # Interaction block
-            h, m = self.int_blocks[i](
+            h, m, dot, sinc_damping = self.int_blocks[i](
                 h=h,
                 m=m,
                 rbf3=rbf3,
@@ -568,6 +785,15 @@ class GemNetT(torch.nn.Module):
                 rbf_h=rbf_h,
                 idx_s=idx_s,
                 idx_t=idx_t,
+                pos=pos,
+                k_grid=k_grid,
+                batch_size=batch_size,
+                batch=batch,
+                dot=dot,
+                sinc_damping=sinc_damping,
+                edge_index_at=edge_index_at,
+                edge_weight_at=edge_weight_at,
+                edge_attr_at=edge_attr_at,
             )  # (nAtoms, emb_size_atom), (nEdges, emb_size_edge)
 
             E, F = self.out_blocks[i + 1](h, m, rbf_out, idx_t)

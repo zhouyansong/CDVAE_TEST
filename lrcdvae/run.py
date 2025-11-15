@@ -13,6 +13,7 @@ import omegaconf
 import pytorch_lightning as pl
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
+
 from pytorch_lightning import seed_everything, Callback
 from pytorch_lightning.callbacks import (
     EarlyStopping,
@@ -80,7 +81,9 @@ def run(cfg: DictConfig) -> None:
             f"Forcing debugger friendly configuration!"
         )
         # Debuggers don't like GPUs nor multiprocessing
-        cfg.train.pl_trainer.gpus = 0
+        # cfg.train.pl_trainer.gpus = 0   # 旧版参数gpus
+        cfg.train.pl_trainer.accelerator = "cpu"
+        cfg.train.pl_trainer.devices = 1
         cfg.data.datamodule.num_workers.train = 0
         cfg.data.datamodule.num_workers.val = 0
         cfg.data.datamodule.num_workers.test = 0
@@ -115,6 +118,9 @@ def run(cfg: DictConfig) -> None:
     torch.save(datamodule.scaler, hydra_dir / 'prop_scaler.pt')
     # Instantiate the callbacks
     callbacks: List[Callback] = build_callbacks(cfg=cfg)
+    # Store the YAML configuration for reproducibility
+    yaml_conf: str = OmegaConf.to_yaml(cfg=cfg)
+    (hydra_dir / "hparams.yaml").write_text(yaml_conf)
 
     # Logger instantiation/configuration
     wandb_logger = None
@@ -131,6 +137,11 @@ def run(cfg: DictConfig) -> None:
             log=cfg.logging.wandb_watch.log,
             log_freq=cfg.logging.wandb_watch.log_freq,
         )
+     # 可选：本地 CSV 日志
+    csv_logger = None
+    if "csvlogger" in cfg.logging:
+        hydra.utils.log.info("Instantiating <CSVLogger>")
+        csv_logger = CSVLogger(save_dir=str(hydra_dir), name=cfg.logging.csvlogger.name)
 
     # Store the YaML config separately into the wandb dir
     yaml_conf: str = OmegaConf.to_yaml(cfg=cfg)
@@ -138,10 +149,23 @@ def run(cfg: DictConfig) -> None:
 
     # Load checkpoint (if exist)
     ckpts = list(hydra_dir.glob('*.ckpt'))
-    if len(ckpts) > 0:
-        ckpt_epochs = np.array([int(ckpt.parts[-1].split('-')[0].split('=')[1]) for ckpt in ckpts])
-        ckpt = str(ckpts[ckpt_epochs.argsort()[-1]])
-        hydra.utils.log.info(f"found checkpoint: {ckpt}")
+    if len(ckpts) > 0 and cfg.train.use_exit:
+        last_ckpt = [ckpt for ckpt in ckpts if ckpt.name == "last.ckpt"]
+        if last_ckpt:
+            ckpt = str(last_ckpt[0])
+            hydra.utils.log.info(f"found last checkpoint: {ckpt}")
+        else:
+            try:
+                # Find checkpoint with highest epoch number
+                ckpt_epochs = np.array([
+                    int(ckpt.stem.split('-')[0].split('=')[1])
+                    for ckpt in ckpts if "epoch=" in ckpt.stem
+                ])
+                ckpt = str(ckpts[np.argmax(ckpt_epochs)])
+                hydra.utils.log.info(f"found checkpoint by max epoch: {ckpt}")
+            except Exception as e:
+                hydra.utils.log.warning(f"failed to parse epoch checkpoints: {e}")
+                ckpt = None
     else:
         ckpt = None
           
@@ -152,21 +176,30 @@ def run(cfg: DictConfig) -> None:
         callbacks=callbacks,
         deterministic=cfg.train.deterministic,
         check_val_every_n_epoch=cfg.logging.val_check_interval,
+        enable_progress_bar=cfg.logging.enable_progress_bar,
+        enable_checkpointing=True,
         # progress_bar_refresh_rate=cfg.logging.progress_bar_refresh_rate,
-        # resume_from_checkpoint=ckpt,
         **cfg.train.pl_trainer,
     )
     log_hyperparameters(trainer=trainer, model=model, cfg=cfg)
 
     hydra.utils.log.info("Starting training!")
-    trainer.fit(model=model, datamodule=datamodule)
+    trainer.fit(model=model, datamodule=datamodule, ckpt_path=ckpt)   #  传入ckpt_path参数加载断点续训
 
+    # Save final checkpoint if configured
+    if cfg.train.model_checkpoints.save_last:
+        last_ckpt_path = os.path.join(hydra_dir, f"last.ckpt")
+        trainer.save_checkpoint(last_ckpt_path)
+    
     hydra.utils.log.info("Starting testing!")
     trainer.test(datamodule=datamodule)
+    hydra.utils.log.info("End")
 
     # Logger closing to release resources/avoid multi-run conflicts
     if wandb_logger is not None:
         wandb_logger.experiment.finish()
+
+    return 0
 
 
 @hydra.main(version_base=None, config_path=str(PROJECT_ROOT / "conf"), config_name="default")
